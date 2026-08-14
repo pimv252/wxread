@@ -5,20 +5,22 @@ concurrency:
   cancel-in-progress: true    # 取消任何正在进行的相同并发组的工作流
 
 on:
-  schedule:
-    # ===== 测试模式：每 5 分钟运行一次（GitHub Actions 最短间隔为 5 分钟，无法设为 1 分钟）=====
-    # 用 1-59/5 避开整点高负载时段（GitHub 官方提示整点触发可能被延迟/丢弃）
-    - cron: '1-59/5 * * * *'
-    # ===== 正常模式（测试完成后恢复）=====
-    # 凌晨任务：北京时间每天 01:00（UTC 前一天 17:00）
-    #- cron: '0 17 * * *'
-    # 早间任务：北京时间每天 05:00（UTC 前一天 21:00）
-    #- cron: '0 21 * * *'
-    # 午间任务：北京时间每天 11:40（UTC 03:40）
-    #- cron: '40 3 * * *'
-    # 晚间任务：北京时间每天 22:00（UTC 14:00）
-    #- cron: '0 14 * * *'
+  # ===== 原 schedule 定时触发（当前 GitHub 端不触发，暂时停用，保留配置备用）=====
+  # schedule:
+  #   # 凌晨任务：北京时间每天 01:00（UTC 前一天 17:00）
+  #   - cron: '0 17 * * *'
+  #   # 早间任务：北京时间每天 05:00（UTC 前一天 21:00）
+  #   #- cron: '0 21 * * *'
+  #   # 午间任务：北京时间每天 11:40（UTC 03:40）
+  #   #- cron: '40 3 * * *'
+  #   # 晚间任务：北京时间每天 22:00（UTC 14:00）
+  #   #- cron: '0 14 * * *'
   workflow_dispatch:  # 手动触发
+    inputs:
+      self_loop:
+        description: '自动循环触发下一次（每 5 分钟一次，用于验证自动运行）'
+        type: boolean
+        default: true
 
 jobs:
   deploy:
@@ -68,3 +70,22 @@ jobs:
       actions: write
     steps:
       - uses: liskin/gh-workflow-keepalive@v1.2.1
+
+  # ===== 自动循环触发（替代 schedule）：每次成功后等 4 分钟，再触发下一次 workflow_dispatch =====
+  # 等效每 5 分钟自动运行一次，不依赖 GitHub schedule 调度
+  self-loop:
+    name: Self-loop trigger (every 5 min)
+    if: ${{ needs.deploy.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.self_loop == true }}
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Wait ~4 minutes
+        run: sleep 240
+
+      - name: Trigger next workflow run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run deploy.yml --ref main -f self_loop=true
