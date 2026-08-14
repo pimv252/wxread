@@ -5,20 +5,14 @@ concurrency:
   cancel-in-progress: false    # 自循环触发时新 run 排队等待旧 run 完成，避免互相取消
 
 on:
-  # ===== 原 schedule 定时触发（当前 GitHub 端不触发，暂时停用，保留配置备用）=====
+  # ===== schedule 定时触发（GitHub 端曾不触发，已改用下方 self-loop 自触发，配置保留备用）=====
   # schedule:
-  #   # 凌晨任务：北京时间每天 01:00（UTC 前一天 17:00）
-  #   - cron: '0 17 * * *'
-  #   # 早间任务：北京时间每天 05:00（UTC 前一天 21:00）
-  #   #- cron: '0 21 * * *'
-  #   # 午间任务：北京时间每天 11:40（UTC 03:40）
-  #   #- cron: '40 3 * * *'
-  #   # 晚间任务：北京时间每天 22:00（UTC 14:00）
-  #   #- cron: '0 14 * * *'
-  workflow_dispatch:  # 手动触发
+  #   # 每天凌晨 00:00（北京时间）= UTC 前一天 16:00
+  #   - cron: '0 16 * * *'
+  workflow_dispatch:  # 手动触发（同时也是 self-loop 自触发的入口）
     inputs:
       self_loop:
-        description: '自动循环触发下一次（每 5 分钟一次，用于验证自动运行）'
+        description: '自动循环触发下一次（每天 6 个检查点，其中北京时间 00:00 那次执行阅读）'
         type: boolean
         default: true
 
@@ -56,10 +50,25 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         SERVERCHAN_SPT:  ${{ secrets.SERVERCHAN_SPT }}
-        READ_NUM: "1"  # 测试模式：仅阅读 1 次（约 30 秒）；正常使用请改回 ${{ vars.READ_NUM }}
+        READ_NUM: ${{ vars.READ_NUM }}  # 阅读次数（仓库变量，正式配置）
 
       run: |
-        python main.py
+        # 时间门控：仅在北京时间每天 00:00（UTC 16:00）前后窗口内执行阅读，
+        # 其余检查点快速跳过，避免自循环的中间 run 重复执行阅读任务
+        UTC_HOUR=$(date -u +%H | sed 's/^0*//')
+        UTC_MIN=$(date -u +%M | sed 's/^0*//')
+        [ -z "$UTC_HOUR" ] && UTC_HOUR=0
+        [ -z "$UTC_MIN" ] && UTC_MIN=0
+        IN_WINDOW=0
+        # 窗口：UTC 15:40 ~ 16:20（北京时间 23:40 ~ 00:20）
+        if [ "$UTC_HOUR" = "15" ] && [ "$UTC_MIN" -ge "40" ]; then IN_WINDOW=1; fi
+        if [ "$UTC_HOUR" = "16" ] && [ "$UTC_MIN" -le "20" ]; then IN_WINDOW=1; fi
+        if [ "$IN_WINDOW" = "1" ]; then
+          echo "In target window (UTC ${UTC_HOUR}:${UTC_MIN} = BJT 00:00), running reading task ..."
+          python main.py
+        else
+          echo "Not in target window (UTC ${UTC_HOUR}:${UTC_MIN}), skip reading task."
+        fi
 
   keepalive-job:
     name: Keepalive Workflow
@@ -71,18 +80,38 @@ jobs:
     steps:
       - uses: liskin/gh-workflow-keepalive@v1.2.1
 
-  # ===== 自动循环触发（替代 schedule）：每次成功后等 4 分钟，再触发下一次 workflow_dispatch =====
-  # 等效每 5 分钟自动运行一次，不依赖 GitHub schedule 调度
+  # ===== 自触发循环（替代不可靠的 schedule）=====
+  # 每天 6 个固定检查点：UTC 00:00 / 04:00 / 08:00 / 12:00 / 16:00 / 20:00
+  # 每次 run 结束后 sleep 到下一个检查点并触发下一次 workflow_dispatch；
+  # 其中 UTC 16:00（北京时间 00:00）那次 run 会真正执行阅读，实现"每天凌晨 12 点自动运行"
   self-loop:
-    name: Self-loop trigger (every 5 min)
+    name: Self-loop trigger (checkpoints every 4h)
     if: ${{ needs.deploy.result == 'success' && github.event_name == 'workflow_dispatch' && inputs.self_loop == true }}
     needs: deploy
     runs-on: ubuntu-latest
     permissions:
       actions: write
     steps:
-      - name: Wait ~4 minutes
-        run: sleep 240
+      - name: Compute wait seconds until next checkpoint (00/04/08/12/16/20 UTC)
+        id: wait
+        run: |
+          NOW=$(date -u +%s)
+          H=$(date -u +%H | sed 's/^0*//')
+          [ -z "$H" ] && H=0
+          NEXT_HOUR=$(( (H / 4 + 1) * 4 ))
+          if [ "$NEXT_HOUR" -ge 24 ]; then
+            NEXT_HOUR=0
+            DAY=$(date -u -d "tomorrow" +%F)
+          else
+            DAY=$(date -u +%F)
+          fi
+          TARGET=$(date -u -d "${DAY} ${NEXT_HOUR}:00:00" +%s)
+          DIFF=$((TARGET - NOW))
+          echo "Now: $(date -u '+%F %T') UTC | Next checkpoint: ${DAY} ${NEXT_HOUR}:00 UTC (in ${DIFF}s)"
+          echo "wait_seconds=${DIFF}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait until next checkpoint
+        run: sleep ${{ steps.wait.outputs.wait_seconds }}
 
       - name: Trigger next workflow run
         env:
