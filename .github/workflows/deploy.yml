@@ -6,8 +6,11 @@ concurrency:
 
 on:
   schedule:
+    # ===== 测试模式：每 5 分钟运行一次（GitHub Actions 最短间隔为 5 分钟，无法设为 1 分钟）=====
+    - cron: '*/5 * * * *'
+    # ===== 正常模式（测试完成后恢复）=====
     # 凌晨任务：北京时间每天 01:00（UTC 前一天 17:00）
-    - cron: '0 17 * * *'
+    #- cron: '0 17 * * *'
     # 早间任务：北京时间每天 05:00（UTC 前一天 21:00）
     #- cron: '0 21 * * *'
     # 午间任务：北京时间每天 11:40（UTC 03:40）
@@ -50,7 +53,7 @@ jobs:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         SERVERCHAN_SPT:  ${{ secrets.SERVERCHAN_SPT }}
-        READ_NUM: ${{ vars.READ_NUM }}  # 使用 Repository Variables
+        READ_NUM: "1"  # 测试模式：仅阅读 1 次（约 30 秒）；正常使用请改回 ${{ vars.READ_NUM }}
 
       run: |
         python main.py
